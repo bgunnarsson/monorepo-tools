@@ -14,7 +14,7 @@ Until the bgunnarsson.config.mjs will be implemented the structure needs to be:
 
 Release
 
-<small>Bumps package.json version, builds all packages and optionally plugins, runs pnpm publish.</small>
+<sub>Bumps package.json version, builds all packages and optionally plugins, runs pnpm publish.</sub>
 
 ```
 bgunnarsson-monorepo release --bump patch
@@ -28,7 +28,7 @@ bgunnarsson-monorepo release --bump major
 
 Housekeeping
 
-<small>Removes ann node_modules and dist folders</small>
+<ub>Removes ann node_modules and dist folders</sub>
 
 ```
 bgunnarsson-monorepo housekeeping
