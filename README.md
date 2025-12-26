@@ -28,7 +28,7 @@ bgunnarsson-monorepo release --bump major
 
 Housekeeping
 
-<ub>Removes ann node_modules and dist folders</sub>
+<sub>Removes ann node_modules and dist folders</sub>
 
 ```
 bgunnarsson-monorepo housekeeping
