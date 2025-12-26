@@ -4,7 +4,7 @@ A set of monorepo tools to make working with pnpm workspaces easier.
 
 ### `Monorepo Structure`
 
-Until I implement the bgunnarsson.config.mjs the structure needs to be:
+Until the bgunnarsson.config.mjs will be implemented the structure needs to be:
 
 * src/pacakges (required)
 * src/plugins (optional)
