@@ -14,7 +14,7 @@ Until the bgunnarsson.config.mjs will be implemented the structure needs to be:
 
 Release
 
-<small>Bumps package.json version, builds all packages and optionally plugins, run pnpm publish.</small>
+<small>Bumps package.json version, builds all packages and optionally plugins, runs pnpm publish.</small>
 
 ```
 bgunnarsson-monorepo release --bump patch
