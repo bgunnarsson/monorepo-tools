@@ -18,7 +18,11 @@ Release
 
 ```
 bgunnarsson-monorepo release --bump patch
+```
+```
 bgunnarsson-monorepo release --bump minor
+```
+```
 bgunnarsson-monorepo release --bump major
 ```
 
