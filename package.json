@@ -1,0 +1,20 @@
+{
+  "name": "@bgunnarsson/monorepo",
+  "version": "1.0.15",
+  "type": "module",
+  "bin": {
+    "bgunnarsson-monorepo": "./bin/cli.mjs"
+  },
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "bin",
+    "commands",
+    "lib",
+    "index.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "ISC"
+}
