@@ -1,6 +1,6 @@
 {
   "name": "@bgunnarsson/monorepo",
-  "version": "1.0.15",
+  "version": "1.0.18",
   "type": "module",
   "bin": {
     "bgunnarsson-monorepo": "./bin/cli.mjs"

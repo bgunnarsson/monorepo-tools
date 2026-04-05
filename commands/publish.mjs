@@ -22,23 +22,20 @@ function parseArgs(argv) {
     buildOrderFile: 'utility/build-order.mjs',
     scopePrefix: DEFAULTS.scopePrefix,
 
-    // npm uses "restricted" for private scoped packages
+    // npm registry uses "restricted" for private scoped packages
     access: process.env.NPM_PUBLISH_ACCESS || 'restricted',
     tag: process.env.NPM_PUBLISH_TAG || undefined,
-
-    // If provided => non-interactive (CI). If omitted => pnpm will prompt (OTP/device auth) via TTY.
-    otp: process.env.NPM_OTP || process.env.NPM_CONFIG_OTP || undefined,
 
     pnpmCmd: DEFAULTS.pnpmCmd,
     noGitChecks: true,
 
-    // 409 handling
-    retry: 12,
-    retryDelayMs: 5000,
-    retryMaxDelayMs: 60000,
+    // registry-latency coping (real strategy: publish -> poll for visibility)
+    betweenMs: 30000,        // 30s between packages
+    pollEveryMs: 15000,      // 15s poll interval for registry visibility
+    publishTimeoutMs: 15 * 60 * 1000, // 15 minutes max per package
 
-    // throttle between publishes
-    betweenMs: 2000,
+    // if publish fails and version is not visible yet, wait then try publish again
+    retryPublishEveryMs: 60000, // 60s between publish attempts while waiting for visibility
 
     dryRun: false,
   }
@@ -54,15 +51,14 @@ function parseArgs(argv) {
     else if (a === '--scope') args.scopePrefix = take(i)
     else if (a === '--access') args.access = take(i)
     else if (a === '--tag') args.tag = take(i)
-    else if (a === '--otp') args.otp = take(i)
     else if (a === '--dry-run') args.dryRun = true
     else if (a === '--pnpm') args.pnpmCmd = take(i)
     else if (a === '--git-checks') args.noGitChecks = false
     else if (a === '--no-git-checks') args.noGitChecks = true
-    else if (a === '--retry') args.retry = Number(take(i))
-    else if (a === '--retry-delay') args.retryDelayMs = Number(take(i))
-    else if (a === '--retry-max-delay') args.retryMaxDelayMs = Number(take(i))
     else if (a === '--between') args.betweenMs = Number(take(i))
+    else if (a === '--poll') args.pollEveryMs = Number(take(i))
+    else if (a === '--timeout') args.publishTimeoutMs = Number(take(i))
+    else if (a === '--retry-publish') args.retryPublishEveryMs = Number(take(i))
   }
 
   if (args.access === 'private') args.access = 'restricted'
@@ -70,10 +66,11 @@ function parseArgs(argv) {
     throw new Error(`Invalid --access: ${args.access} (use "public" or "restricted")`)
   }
 
-  if (!Number.isFinite(args.retry) || args.retry < 0) args.retry = 0
-  if (!Number.isFinite(args.retryDelayMs) || args.retryDelayMs < 0) args.retryDelayMs = 0
-  if (!Number.isFinite(args.retryMaxDelayMs) || args.retryMaxDelayMs < 0) args.retryMaxDelayMs = 0
-  if (!Number.isFinite(args.betweenMs) || args.betweenMs < 0) args.betweenMs = 0
+  const clamp0 = (n) => (Number.isFinite(n) && n >= 0 ? n : 0)
+  args.betweenMs = clamp0(args.betweenMs)
+  args.pollEveryMs = clamp0(args.pollEveryMs)
+  args.publishTimeoutMs = clamp0(args.publishTimeoutMs)
+  args.retryPublishEveryMs = clamp0(args.retryPublishEveryMs)
 
   return args
 }
@@ -172,66 +169,30 @@ function orderPkgs(pkgs, { ORDER, PLUGIN_ORDER }, { packagesRoot, pluginsRoot })
 }
 
 function runCmd(cmd, args, { cwd, label }) {
-  // stdin MUST be inherit so pnpm/npm can prompt (OTP / device auth)
-  // stdout/stderr piped so we can parse 409 and still mirror output
+  // let pnpm/npm do its normal auth/OTP prompt if needed
+  const env = { ...process.env }
+  delete env.NPM_OTP
+  delete env.NPM_CONFIG_OTP
+  delete env.npm_config_otp
+
   const res = spawnSync(cmd, args, {
     cwd,
-    env: process.env,
-    encoding: 'utf8',
-    stdio: ['inherit', 'pipe', 'pipe'],
+    env,
+    stdio: 'inherit',
   })
-
-  const out = `${res.stdout || ''}\n${res.stderr || ''}`
-
-  if (res.stdout) process.stdout.write(res.stdout)
-  if (res.stderr) process.stderr.write(res.stderr)
 
   const code = res.status ?? (res.error ? 1 : 0)
   if (code !== 0) {
     const err = new Error(`${label}: ${cmd} ${args.join(' ')} failed with exit code ${code} (cwd: ${cwd})`)
     err.code = code
-    err.output = out
     err.spawnError = res.error
     throw err
   }
-
-  return out
 }
 
-function is409FromOutput(s) {
-  return (
-    /(^|\b)E409(\b|$)/i.test(s) ||
-    /409\s+Conflict/i.test(s) ||
-    /Failed to save packument/i.test(s) ||
-    /previous package has not been fully processed/i.test(s)
-  )
-}
-
-function isNotFoundFromOutput(s) {
-  return /(^|\b)E404(\b|$)/i.test(s) || /404\s+Not\s+Found/i.test(s) || /is not in the npm registry/i.test(s)
-}
-
-function isAlreadyPublishedFromOutput(s) {
-  return (
-    /cannot publish over the previously published versions/i.test(s) ||
-    /You cannot publish over the previously published versions/i.test(s) ||
-    /previously published/i.test(s) ||
-    /cannot modify pre-existing version/i.test(s)
-  )
-}
-
-function clamp(n, lo, hi) {
-  return Math.max(lo, Math.min(hi, n))
-}
-
-function nextDelayMs(baseMs, attempt, maxMs) {
-  const raw = baseMs * Math.pow(2, Math.max(0, attempt - 1))
-  return clamp(Math.floor(raw), 0, maxMs)
-}
-
-function hasPublishedVersion(pnpmCmd, spec) {
-  const args = ['view', spec, 'version']
-  const res = spawnSync(pnpmCmd, args, {
+function versionVisible(pnpmCmd, name, version) {
+  const spec = `${name}@${version}`
+  const res = spawnSync(pnpmCmd, ['view', spec, 'version'], {
     cwd: process.cwd(),
     env: process.env,
     encoding: 'utf8',
@@ -241,46 +202,58 @@ function hasPublishedVersion(pnpmCmd, spec) {
   const out = `${res.stdout || ''}\n${res.stderr || ''}`
   const code = res.status ?? (res.error ? 1 : 0)
 
-  if (code === 0) return true
-  if (isNotFoundFromOutput(out)) return false
+  if (code === 0) {
+    // stdout is typically the version string
+    return out.includes(version)
+  }
 
-  const err = new Error(`view: ${pnpmCmd} ${args.join(' ')} failed (cannot determine published status)`)
+  // treat 404 as "not visible yet"
+  if (/\bE404\b/i.test(out) || /404\s+Not\s+Found/i.test(out) || /is not in the npm registry/i.test(out)) {
+    return false
+  }
+
+  // unknown failure: do not guess
+  const err = new Error(`view failed: ${pnpmCmd} view ${spec} version`)
   err.code = code
   err.output = out
   err.spawnError = res.error
   throw err
 }
 
-async function publishOne({ pnpmCmd, publishArgs, cwd, label, spec, retries, baseDelayMs, maxDelayMs }) {
-  let attempt = 0
+async function publishAndWaitVisible({
+  pnpmCmd,
+  publishArgs,
+  cwd,
+  label,
+  name,
+  version,
+  timeoutMs,
+  pollEveryMs,
+  retryPublishEveryMs,
+}) {
+  const start = Date.now()
+  let lastPublishAttempt = 0
 
   for (;;) {
-    try {
-      runCmd(pnpmCmd, publishArgs, { cwd, label })
-      return
-    } catch (e) {
-      const out = String(e?.output || '')
+    if (versionVisible(pnpmCmd, name, version)) return
 
-      // If publish actually landed, treat as success and continue.
-      if (isAlreadyPublishedFromOutput(out)) return
-
-      // 409: registry conflict/processing. Back off and verify.
-      if (is409FromOutput(out)) {
-        attempt++
-        if (attempt > retries) throw e
-
-        const delay = nextDelayMs(baseDelayMs, attempt, maxDelayMs)
-        log(`retry: 409 ${label} (attempt ${attempt}/${retries}) wait ${delay}ms`)
-        await sleep(delay)
-
-        // If the version became visible while we waited, stop retrying.
-        if (hasPublishedVersion(pnpmCmd, spec)) return
-
-        continue
-      }
-
-      throw e
+    const elapsed = Date.now() - start
+    if (elapsed >= timeoutMs) {
+      throw new Error(`${label}: version still not visible in registry after ${Math.ceil(timeoutMs / 60000)} minutes`)
     }
+
+    // try publish, but not on every tight loop
+    const now = Date.now()
+    if (now - lastPublishAttempt >= retryPublishEveryMs) {
+      lastPublishAttempt = now
+      try {
+        runCmd(pnpmCmd, publishArgs, { cwd, label })
+      } catch {
+        // ignore: we only care about eventual visibility
+      }
+    }
+
+    await sleep(pollEveryMs)
   }
 }
 
@@ -310,45 +283,44 @@ export async function runPublish(argv) {
     if (typeof name !== 'string' || !name.startsWith(args.scopePrefix)) continue
     if (typeof version !== 'string' || !version) throw new Error(`Missing version in ${rel}/package.json`)
 
-    const spec = `${name}@${version}`
-
-    // idempotent reruns
-    if (hasPublishedVersion(args.pnpmCmd, spec)) {
-      log(`skip: already published ${spec}`)
-      continue
-    }
-
     const publishArgs = ['publish']
-
     if (args.noGitChecks) publishArgs.push('--no-git-checks')
     if (isScoped && args.access) publishArgs.push('--access', args.access)
     if (args.tag) publishArgs.push('--tag', args.tag)
-    if (args.otp) publishArgs.push('--otp', args.otp)
 
     if (args.dryRun) {
-      log(`dry-run: publish ${rel} (${spec})`)
+      log(`dry-run: ${rel} -> pnpm publish`)
       continue
     }
 
     log(`publish: ${rel}`)
 
-    await publishOne({
+    // If already visible, do nothing (rerun-safe).
+    if (versionVisible(args.pnpmCmd, name, version)) {
+      log(`skip: already in registry ${name}@${version}`)
+      if (args.betweenMs > 0) await sleep(args.betweenMs)
+      continue
+    }
+
+    // Attempt once normally (keeps OTP/auth prompts intact).
+    try {
+      runCmd(args.pnpmCmd, publishArgs, { cwd: p.dir, label: `publish (${rel})` })
+    } catch {
+      // fall through to "publish and wait visible" loop
+    }
+
+    // Npm can return 409 even when publish succeeded but metadata isn't visible yet.
+    await publishAndWaitVisible({
       pnpmCmd: args.pnpmCmd,
       publishArgs,
       cwd: p.dir,
       label: `publish (${rel})`,
-      spec,
-      retries: args.retry,
-      baseDelayMs: args.retryDelayMs,
-      maxDelayMs: args.retryMaxDelayMs,
+      name,
+      version,
+      timeoutMs: args.publishTimeoutMs,
+      pollEveryMs: args.pollEveryMs,
+      retryPublishEveryMs: args.retryPublishEveryMs,
     })
-
-    // confirm after publish attempt; this catches "publish succeeded but client got 409" cases
-    if (hasPublishedVersion(args.pnpmCmd, spec)) {
-      log(`ok: ${spec}`)
-    } else {
-      throw new Error(`publish: registry did not show ${spec} after publish attempt`)
-    }
 
     if (args.betweenMs > 0) await sleep(args.betweenMs)
   }
